@@ -1,8 +1,10 @@
 ﻿using Kitchen;
+using Kitchen.Modules;
 using Kitchen.ShopBuilder;
 using Kitchen.ShopBuilder.Filters;
 using KitchenData;
 using KitchenLib.DevUI;
+using KitchenLib.References;
 using KitchenLib.Utils;
 using System;
 using System.Collections.Generic;
@@ -126,6 +128,8 @@ namespace KitchenSeedScanner
         private RestaurantSetting _activeRestaurantSetting = null;
         private UnlockPack _activeUnlockPack => _activeRestaurantSetting?.UnlockPack;
 
+        private static UnlockCardElement _cardPrefabComp;
+
         private enum UnlockDisplayMode
         {
             SelectionPath,
@@ -143,6 +147,14 @@ namespace KitchenSeedScanner
             RequiredProcesses,
             ActiveThemes
         }
+
+        private static readonly HashSet<int> CustomerMultiplierUnlockExceptions = new HashSet<int>()
+        {
+            UnlockCardReferences.MorningRush,
+            UnlockCardReferences.LunchRush,
+            UnlockCardReferences.DinnerRush,
+            UnlockCardReferences.ClosingTime
+        };
 
         private static Dictionary<Type, (ShopFilterGDOType, Func<SystemReference, CShopBuilderOption, List<int>, CShopBuilderOption>)> _replacementFilters = 
             new Dictionary<Type, (ShopFilterGDOType, Func<SystemReference, CShopBuilderOption, List<int>, CShopBuilderOption>)>()
@@ -491,9 +503,14 @@ namespace KitchenSeedScanner
             public string Name;
 
             public int Day;
-            public int CumulativeCustomerMultiplier;
+            public int CustomersPerHourReductionExponent;   // Card Customer % Adjustment
+            public float CustomersPerHourChange;    // ParameterEffect
+            public Factor BaseCustomerMultiplier;    // CustomerSpawnEffect
+            public Factor PerDayCustomerMultiplier;  // CustomerSpawnEffect
             public int Courses;
             public float CourseCustomerDivisor;
+
+            public List<string> ExcludedCustomerCountUnlockNames;
 
             public bool IsInit = false;
             public bool IsExpanded = false;
@@ -504,6 +521,7 @@ namespace KitchenSeedScanner
             public int SelectedChild = -1;
 
             private int _totalRerolls = 0;
+
             public int TotalRerolls
             {
                 get
@@ -537,15 +555,52 @@ namespace KitchenSeedScanner
 
             public void PopulateChildren()
             {
-                int customerMultiplier = 0;
+                int customerMultiplierExponent = 0;
+                float customersPerHourChange = 0f;
+                Factor baseCustomerMultiplier = default;
+                Factor perDayCustomerMultiplier = default;
                 HashSet<DishType> presentDishTypes = new HashSet<DishType>();
+                List<string> excludedCustomerCountUnlockNames = new List<string>();
                 foreach (int unlockID in SelectedOptions)
                 {
+                    bool isExcluded = false;
+                    string unlockName = unlockID.ToString();
+                    if (CustomerMultiplierUnlockExceptions.Contains(unlockID))
+                    {
+                        isExcluded = true;
+                    }
+
                     if (GameData.Main.TryGet(unlockID, out Unlock unlock))
                     {
+                        unlockName = unlock.Name.IsNullOrEmpty()? unlockName : unlock.Name;
                         if (unlock.CustomerMultiplier != DishCustomerChange.FranchiseTier)
                         {
-                            customerMultiplier += unlock.CustomerMultiplier.Value();
+                            customerMultiplierExponent += unlock.CustomerMultiplier.Value();
+                        }
+
+                        if (unlock is UnlockCard unlockCard)
+                        {
+                            foreach (UnlockEffect unlockEffect in unlockCard.Effects)
+                            {
+                                if (!(unlockEffect is ParameterEffect parameterEffect))
+                                {
+                                    if (!(unlockEffect is CustomerSpawnEffect customerSpawnEffect))
+                                    {
+                                    }
+                                    else
+                                    {
+                                        baseCustomerMultiplier += customerSpawnEffect.Base;
+                                        if (Day >= 0)
+                                        {
+                                            perDayCustomerMultiplier += customerSpawnEffect.PerDay.Repeat(Day);
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    customersPerHourChange += parameterEffect.Parameters.CustomersPerHour;
+                                }
+                            }
                         }
 
                         if (unlock is Dish dish)
@@ -567,12 +622,22 @@ namespace KitchenSeedScanner
                             }
                         }
                     }
+
+                    if (isExcluded)
+                    {
+                        excludedCustomerCountUnlockNames.Add(unlockName);
+                    }
                 }
+
                 Courses = presentDishTypes.Count >= 1 ? presentDishTypes.Count : 1;
                 CourseCustomerDivisor = 1 + (Courses - 1) * 0.25f;
-                CumulativeCustomerMultiplier = customerMultiplier;
+                CustomersPerHourReductionExponent = customerMultiplierExponent;
+                CustomersPerHourChange = customersPerHourChange;
+                BaseCustomerMultiplier = baseCustomerMultiplier;
+                PerDayCustomerMultiplier = perDayCustomerMultiplier;
+                ExcludedCustomerCountUnlockNames = excludedCustomerCountUnlockNames;
 
-                int nextDay = Day;
+                int nextDay;
                 for (int i = 1; i <= MaxDayInterval; i++)
                 {
                     nextDay = Day + i;
@@ -580,7 +645,6 @@ namespace KitchenSeedScanner
                     using (fixedSeedContext.UseSubcontext(1))
                     {
                         UnlockOptions options = UnlockPack.GetOptions(SelectedOptions, new UnlockRequest(nextDay, Tier));
-
                         if (options.Unlock1 == default && options.Unlock2 == default)
                         {
                             continue;
@@ -630,6 +694,11 @@ namespace KitchenSeedScanner
                 //    }
                 //}
                 IsInit = true;
+            }
+
+            public float GetCumulativeCustomerMultiplier()
+            {
+                return Mathf.Pow(1f - DifficultyHelpers.CustomerChangePerPoint / 100f, CustomersPerHourReductionExponent) * (1f + CustomersPerHourChange) * BaseCustomerMultiplier * PerDayCustomerMultiplier / CourseCustomerDivisor;
             }
 
             public void RecurseCollapse()
@@ -682,7 +751,7 @@ namespace KitchenSeedScanner
                 if (!HasChildren || (Child1 != null && Child1.Day > dayLimit) || (Child2 != null && Child2.Day > dayLimit))
                 {
                     return new List<string>() { String.Join(",", SelectedOptions.Select(x => GameData.Main.TryGet(x, out Unlock unlock) ? unlock.Name : $"Unknown ({x})")) + 
-                        $",{Courses},{$"{Mathf.Pow(1f - DifficultyHelpers.CustomerChangePerPoint / 100f, CumulativeCustomerMultiplier) / CourseCustomerDivisor * 100f:0.##}%"}" };
+                        $",{Courses},{$"{GetCumulativeCustomerMultiplier() * 100f:0.##}%"}" };
                 }
 
                 if (Child1 != null)
@@ -715,6 +784,68 @@ namespace KitchenSeedScanner
                 }
                 return lines;
             }
+
+            public string ExportCardsUpToDay(int day)
+            {
+                List<Unlock> unlocks = GetCardImages(day, isFirst: true);
+
+                string folderPath = $"SeedScan/{Seed.StrValue}_{(Setting.Name.IsNullOrEmpty() ? Setting.ID : Setting.Name)}_{(StartingDish.Name.IsNullOrEmpty() ? StartingDish.ID : StartingDish.Name)}";
+
+                int fade = Shader.PropertyToID("_NightFade");
+                float nightFade = Shader.GetGlobalFloat(fade);
+                Shader.SetGlobalFloat(fade, 0f);
+
+                foreach (Unlock unlock in unlocks)
+                {
+                    GameObject instance = GameObject.Instantiate(_cardPrefabComp.gameObject);
+                    instance.transform.localPosition = Vector3.zero;
+                    //instance.transform.localScale = Vector3.one;
+                    instance.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+                    UnlockCardElement element = instance.GetComponent<UnlockCardElement>();
+                    element.SetUnlock(unlock);
+                    SnapshotTexture snapshotTexture = Snapshot.RenderToTexture(1024, 1024, element.gameObject, 1f, 1f, -10f, 10f, Vector3.back * 0.742f);
+                    Texture2D texture = snapshotTexture.Snapshot;
+                    GameObject.Destroy(instance);
+                    string filename = $"{(unlock.Name.IsNullOrEmpty() ? unlock.ID.ToString() : unlock.Name)}.png";
+                    WriteTextureToPNG(folderPath, filename, texture);
+                }
+
+                Shader.SetGlobalFloat(fade, nightFade);
+                return $"Exported to {folderPath}";
+            }
+
+            private List<Unlock> GetCardImages(int dayLimit, bool isFirst = false)
+            {
+                List<Unlock> unlocks = new List<Unlock>();
+                if (!IsInit)
+                {
+                    PopulateChildren();
+                }
+
+                if (!HasChildren || (Child1 != null && Child1.Day > dayLimit) || (Child2 != null && Child2.Day > dayLimit))
+                {
+                    return SelectedOptions.Distinct().Select(x => GameData.Main.TryGet(x, out Unlock unlock) ? unlock : null).Where(x => x != null).ToList();
+                }
+
+                if (Child1 != null)
+                {
+                    MergeIntoUnlocks(Child1.GetCardImages(dayLimit));
+                }
+                if (Child2 != null)
+                {
+                    MergeIntoUnlocks(Child2.GetCardImages(dayLimit));
+                }
+
+                void MergeIntoUnlocks(List<Unlock> unlocksToMerge)
+                {
+                    foreach (Unlock unlock in unlocksToMerge)
+                    {
+                        if (!unlocks.Contains(unlock))
+                            unlocks.Add(unlock);
+                    }
+                }
+                return unlocks;
+            }
         }
 
         protected override void OnInitialise()
@@ -733,6 +864,18 @@ namespace KitchenSeedScanner
                         Staple = ShopStapleType.NonStaple,
                     });
                 }
+            }
+
+            Main.LogWarning($"Unlock Card Option GOs = {UnityEngine.Object.FindObjectsOfType<GameObject>(true).Where(x => x.name == "Unlock Card Option").Count()}");
+            GameObject gO = Resources.FindObjectsOfTypeAll(typeof(GameObject)).Cast<GameObject>().Where(x => x.name == "Unlock Card Option").FirstOrDefault();
+            if (gO != null && gO.HasComponent<UnlockCardElement>())
+            {
+                GameObject prefab = GameObject.Instantiate(gO);
+                prefab.name = "Card Snapshot Prefab";
+                GameObject container = new GameObject("Prefab Hider");
+                container.SetActive(false);
+                prefab.transform.SetParent(container.transform);
+                _cardPrefabComp = prefab.GetComponent<UnlockCardElement>();
             }
         }
 
@@ -820,6 +963,11 @@ namespace KitchenSeedScanner
                 _statusText = _topLevelUnlockChoice.ExportUpToDay(15);
             }
 
+            if (_topLevelUnlockChoice != null && _cardPrefabComp != null && GUILayout.Button($"Export {_activeSeed.StrValue} Day 15 Card Images"))
+            {
+                _statusText = _topLevelUnlockChoice.ExportCardsUpToDay(15);
+            }
+
             if (!_statusText.IsNullOrEmpty())
             {
                 GUILayout.Label(_statusText);
@@ -841,6 +989,21 @@ namespace KitchenSeedScanner
             }
 
             GUILayout.EndArea();
+
+            if (!GUI.tooltip.IsNullOrEmpty())
+            {
+                float tooltipWidth = 300f;
+                Vector2 tooltipPosition = Event.current.mousePosition;
+                tooltipPosition.x -= tooltipWidth / 2;
+                tooltipPosition.y += 20f;
+
+                float tooltipHeight = GUI.skin.label.CalcHeight(new GUIContent(GUI.tooltip), tooltipWidth);
+                Vector2 tooltipSize = new Vector2(tooltipWidth, tooltipHeight);
+                Rect tooltipRect = new Rect(tooltipPosition, tooltipSize);
+
+                GUI.DrawTexture(tooltipRect, Background);
+                GUI.Label(tooltipRect, GUI.tooltip);
+            }
         }
 
         private UnlockChoice DrawUnlockChoiceHierarchy(UnlockChoice choice, ref Vector2 scrollPosition, float? width = null)
@@ -917,8 +1080,18 @@ namespace KitchenSeedScanner
 
                     GUILayout.BeginHorizontal();
                     GUILayout.Space(unitIndent * nextIndentLevel);
-                    GUILayout.Label($"Customer Multiplier = " +
-                        $"{Mathf.Pow(1f - DifficultyHelpers.CustomerChangePerPoint / 100f, choice.CumulativeCustomerMultiplier) / choice.CourseCustomerDivisor * 100f:0.##}%");
+                    Color defaultContentColor = GUI.contentColor;
+                    string tooltip = null;
+                    if (choice.ExcludedCustomerCountUnlockNames.Count > 0)
+                    {
+                        GUI.contentColor = new Color(100f, 0f, 0f);
+                        tooltip = "Inaccurate customer multiplier.\nSome card effects are excluded from calculation:\n"
+                                + String.Join("\n", choice.ExcludedCustomerCountUnlockNames);
+                    }
+                    GUIContent customerMultiplierContent = new GUIContent($"Customer Multiplier = {choice.GetCumulativeCustomerMultiplier() * 100f:0.##}%", tooltip);
+                    GUILayout.Label(customerMultiplierContent);
+                    GUI.contentColor = defaultContentColor;
+
                     GUILayout.EndHorizontal();
 
                     if (choice.HasChildren)
@@ -1005,8 +1178,21 @@ namespace KitchenSeedScanner
 
                 GUILayout.BeginHorizontal(GUILayout.Width(drawWidth));
                 GUILayout.Label($"Courses = {choice.Courses}", LabelCentreStyle);
-                GUILayout.Label($"Customer Multiplier = " +
-                    $"{Mathf.Pow(1f - DifficultyHelpers.CustomerChangePerPoint / 100f, choice.CumulativeCustomerMultiplier) / choice.CourseCustomerDivisor * 100f:0.##}%", LabelCentreStyle);
+
+
+                Color defaultContentColor = GUI.contentColor;
+                string tooltip = null;
+                if (choice.ExcludedCustomerCountUnlockNames.Count > 0)
+                {
+                    GUI.contentColor = new Color(100f, 0f, 0f);
+                    tooltip = "Inaccurate customer multiplier.\nSome card effects are excluded from calculation:\n"
+                        + String.Join("\n", choice.ExcludedCustomerCountUnlockNames);
+                }
+                GUIContent customerMultiplierContent = new GUIContent($"Customer Multiplier = {choice.GetCumulativeCustomerMultiplier() * 100f:0.##}%", tooltip);
+                GUILayout.Label(customerMultiplierContent, LabelCentreStyle);
+                GUI.contentColor = defaultContentColor;
+
+                //GUILayout.Label($"Customer Multiplier = {choice.GetCumulativeCustomerMultiplier() * 100f:0.##}%", LabelCentreStyle);
                 GUILayout.EndHorizontal();
 
                 if (!choice.HasChildren)
