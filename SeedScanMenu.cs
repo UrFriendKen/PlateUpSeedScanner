@@ -78,7 +78,9 @@ namespace KitchenSeedScanner
 
         public static string WriteToTextFile(string folder, string filename, string data)
         {
-            if (!Directory.Exists($"{PERSISTENT_DATA_PATH}{folder}"))
+            filename = GetSafeFilename(filename);
+
+            if (!Directory.Exists($"{PERSISTENT_DATA_PATH}/{folder}"))
                 Directory.CreateDirectory($"{PERSISTENT_DATA_PATH}/{folder}");
 
             string filepath = $"{PERSISTENT_DATA_PATH}/{folder}/{filename}";
@@ -89,7 +91,9 @@ namespace KitchenSeedScanner
 
         public static string WriteTextureToPNG(string folder, string filename, Texture2D texture)
         {
-            if (!Directory.Exists($"{PERSISTENT_DATA_PATH}{folder}"))
+            filename = GetSafeFilename(filename);
+
+            if (!Directory.Exists($"{PERSISTENT_DATA_PATH}/{folder}"))
                 Directory.CreateDirectory($"{PERSISTENT_DATA_PATH}/{folder}");
 
             byte[] bytes = texture.EncodeToPNG();
@@ -97,6 +101,11 @@ namespace KitchenSeedScanner
             File.WriteAllBytes(filepath, bytes);
 
             return filepath;
+        }
+
+        public static string GetSafeFilename(string path)
+        {
+            return string.Join("_", path.Split(Path.GetInvalidFileNameChars()));
         }
 
         protected virtual void OnInitialise()
