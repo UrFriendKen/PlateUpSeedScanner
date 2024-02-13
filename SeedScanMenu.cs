@@ -670,8 +670,10 @@ namespace KitchenSeedScanner
 
                         UnlockChoice CreateChildUnlockChoice(Unlock childUnlock)
                         {
-                            HashSet<int> unlockSelectedOptions = new HashSet<int>(SelectedOptions);
-                            unlockSelectedOptions.Add(childUnlock.ID);
+                            HashSet<int> unlockSelectedOptions = new HashSet<int>(SelectedOptions)
+                            {
+                                childUnlock.ID
+                            };
 
                             return new UnlockChoice(Seed, Setting, UnlockPack, StartingDish, Tier, MaxDayInterval)
                             {
@@ -860,7 +862,15 @@ namespace KitchenSeedScanner
         protected override void OnInitialise()
         {
             _restaurantSettings = GameData.Main.Get<RestaurantSetting>().ToList();
-            _dishes = GameData.Main.Get<Dish>().Where(x => x.Type == DishType.Base && x.IsUnlockable).ToList();
+            _dishes = GameData.Main.TryGet(-1972821425, out LevelUpgradeSet dishesUpgradeSet) ?
+                dishesUpgradeSet.Upgrades
+                    .Where(x => x?.Upgrade != null && x.Upgrade is Dish)
+                    .OrderBy(x => x.Level)
+                    .Select(x => x.Upgrade as Dish)
+                    .ToList() : 
+                GameData.Main.Get<Dish>()
+                    .Where(x => x.Type == DishType.Base && x.IsUnlockable)
+                    .ToList();
 
             _shopBuilderOptions = new List<CShopBuilderOption>();
             foreach (Appliance appliance in GameData.Main.Get<Appliance>())
