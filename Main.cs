@@ -1,7 +1,12 @@
-﻿using Kitchen.ShopBuilder;
+﻿using Kitchen;
+using Kitchen.ShopBuilder;
+using KitchenData;
 using KitchenLib;
+using KitchenLib.Utils;
 using KitchenMods;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Reflection;
 using Unity.Entities;
 using UnityEngine;
@@ -16,7 +21,7 @@ namespace KitchenSeedScanner
         // Mod Version must follow semver notation e.g. "1.2.3"
         public const string MOD_GUID = "IcedMilo.PlateUp.SeedScanner";
         public const string MOD_NAME = "Seed Scanner";
-        public const string MOD_VERSION = "0.1.4";
+        public const string MOD_VERSION = "0.1.6";
         public const string MOD_AUTHOR = "IcedMilo";
         public const string MOD_GAMEVERSION = ">=1.1.5";
         // Game version this mod is designed for in semver
@@ -68,6 +73,67 @@ namespace KitchenSeedScanner
         {
             LogWarning($"{MOD_GUID} v{MOD_VERSION} in use!");
             RegisterMenu<SeedScanMenu>();
+        }
+
+        protected override void OnPreInject()
+        {
+            base.OnPreInject();
+
+            UnlockCardElement _cardPrefabComp = null;
+
+            GameObject gO = Resources.FindObjectsOfTypeAll(typeof(GameObject)).Cast<GameObject>().Where(x => x.name == "Unlock Card Option").FirstOrDefault();
+            if (gO != null && gO.HasComponent<UnlockCardElement>())
+            {
+                GameObject prefab = GameObject.Instantiate(gO);
+                prefab.name = "Card Snapshot Prefab";
+                GameObject container = new GameObject("Prefab Hider");
+                container.SetActive(false);
+                prefab.transform.SetParent(container.transform);
+                _cardPrefabComp = prefab.GetComponent<UnlockCardElement>();
+            }
+
+            if (_cardPrefabComp == null)
+                return;
+
+            string folderPath = $"CardImages";
+
+            int fade = Shader.PropertyToID("_NightFade");
+            float nightFade = Shader.GetGlobalFloat(fade);
+            Shader.SetGlobalFloat(fade, 0f);
+
+            foreach (Unlock unlock in GameData.Main.Get<Unlock>())
+            {
+                GameObject instance = GameObject.Instantiate(_cardPrefabComp.gameObject);
+                instance.transform.localPosition = Vector3.zero;
+                //instance.transform.localScale = Vector3.one;
+                instance.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+                UnlockCardElement element = instance.GetComponent<UnlockCardElement>();
+                element.SetUnlock(unlock);
+                SnapshotTexture snapshotTexture = Snapshot.RenderToTexture(1024, 1024, element.gameObject, 1f, 1f, -10f, 10f, Vector3.back * 0.742f);
+                Texture2D texture = snapshotTexture.Snapshot;
+                GameObject.Destroy(instance);
+                string filename = $"{unlock.CardType}_{unlock.UnlockGroup}_{(unlock.Name.IsNullOrEmpty() ? unlock.ID.ToString() : unlock.Name)}.png";
+                WriteTextureToPNG(folderPath, filename, texture);
+            }
+            Shader.SetGlobalFloat(fade, nightFade);
+        }
+
+        public static string WriteTextureToPNG(string folder, string filename, Texture2D texture)
+        {
+            filename = GetSafeFilename(filename);
+
+            if (!Directory.Exists($"{Application.persistentDataPath}/{folder}"))
+                Directory.CreateDirectory($"{Application.persistentDataPath}/{folder}");
+
+            byte[] bytes = texture.EncodeToPNG();
+            string filepath = $"{Application.persistentDataPath}/{folder}/{filename}";
+            File.WriteAllBytes(filepath, bytes);
+
+            return filepath;
+        }
+        public static string GetSafeFilename(string path)
+        {
+            return string.Join("_", path.Split(Path.GetInvalidFileNameChars()));
         }
 
         #region Logging

@@ -42,6 +42,12 @@ namespace KitchenSeedScanner
 
         public sealed override void Setup()
         {
+            // Temp while OnInit is broken
+            if (Background == null)
+            {
+                OnInit();
+            }
+
             if (LabelLeftStyle == null)
             {
                 LabelLeftStyle = new GUIStyle(GUI.skin.label);
@@ -867,10 +873,14 @@ namespace KitchenSeedScanner
                     .Where(x => x?.Upgrade != null && x.Upgrade is Dish)
                     .OrderBy(x => x.Level)
                     .Select(x => x.Upgrade as Dish)
-                    .ToList() : 
-                GameData.Main.Get<Dish>()
-                    .Where(x => x.Type == DishType.Base && x.IsUnlockable)
-                    .ToList();
+                    .ToList() :
+                new List<Dish>();
+
+            _dishes.Concat(GameData.Main.Get<Dish>()
+                .Where(x => x.Type == DishType.Base &&
+                    x.IsUnlockable &&
+                    !_dishes.Contains(x))
+                .ToList());
 
             _shopBuilderOptions = new List<CShopBuilderOption>();
             foreach (Appliance appliance in GameData.Main.Get<Appliance>())
